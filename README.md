@@ -17,8 +17,6 @@ The `sedprep` package offers a range of functionalities, including:
 
 5. **Sediment Data Preprocessing**: After estimating the necessary parameters, `sedprep` provides a function to preprocess sediment data, ensuring that your data is corrected for known distortions and ready for scientific analysis.
 
-The main package is using a Kalman Filter approach. An MCMC approach is implemented in the `mcmc` branch.
-
 ## Citation
 If you use :code:`sedprep`, please cite the corresponding papers
 
@@ -35,13 +33,6 @@ If you use :code:`sedprep`, please cite the corresponding papers
   | *JGR Solid Earth* (129)
   | e2024JB028864 
 [![DOI](https://img.shields.io/badge/DOI-10.1029%2F2023JB027373-blue.svg)](https://doi.org/10.1029/2024JB028864)
-
-  | **Bohsung**, L.; **Schanner**, M. A.; **Korte**, M.; **Holschneider**, M. (2024)
-  | Bayesian preprocessing for palaeomagnetic sediment records
-  | using a flexible lock-in Function approach
-  | *JGR Solid Earth* (129)
-  | e2024JB029936 
-[![DOI](https://img.shields.io/badge/DOI-10.1029%2F2023JB027373-blue.svg)](https://doi.org/10.1029/2024JB029936)
 
 
 ## Installation

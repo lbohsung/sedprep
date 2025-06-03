@@ -17,14 +17,6 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-import torch
-
-# some torch setup
-torch.set_default_dtype(torch.float64)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# device = "cpu"
-dtype = torch.get_default_dtype()
-
 pi = 3.141592653589793
 rad2deg = 180 / pi
 
@@ -69,49 +61,72 @@ archkalmag_field_params_1p = {
     "axial": False,
 }
 
+# archkalmag_field_params_2p = {
+#     "lmax": 5,
+#     "R": 2800,  # km
+#     "gamma": -32.8,  # uT
+#     "alpha_dip": 39.6,  # uT
+#     "tau_dip": 23.7,  # yrs
+#     "tau_dip_slow": 986,  # yrs
+#     "alpha_wodip": 94.5,  # uT
+#     "tau_wodip": 514.0,  # yrs
+#     "axial": False,
+# }
+
+
 archkalmag_field_params_2p = {
     "lmax": 5,
     "R": 2800,  # km
-    "gamma": -32.8,  # uT
-    "alpha_dip": 39.6,  # uT
-    "tau_dip": 23.7,  # yrs
-    "tau_dip_slow": 986,  # yrs
-    "alpha_wodip": 94.5,  # uT
-    "tau_wodip": 514.0,  # yrs
+    "gamma": -38.96,  # uT
+    "alpha_dip": 54.2,  # uT
+    "omega_dip": 1 / 285.72,  # yrs
+    "xi_dip": 1 / 94.82,  # yrs
+    "alpha_wodip": 88.44,  # uT
+    "tau_wodip": 694.3,  # yrs
     "axial": False,
 }
+
 
 pfm9k_field_params = {
     "lmax": 5,
     "R": 6371.2,
     "gamma": -32.5,
-    "alpha_dip": torch.tensor([10, 3.5, 3.5], device=device, dtype=dtype),
-    "tau_dip": torch.tensor(
-        [x / (2 * pi) for x in [433, 200, 200]], device=device, dtype=dtype
-    ),
+    "alpha_dip": [10, 3.5, 3.5],
+    "tau_dip": [x / (2 * pi) for x in [433, 200, 200]],
     "tau_dip_slow": 50_000 / (2 * pi),
-    "alpha_wodip": torch.tensor(
-        5 * [1.765] + 7 * [1.011] + 9 * [0.455] + 11 * [0.177],
-        device=device,
-        dtype=dtype,
-    ),
-    "tau_wodip": torch.tensor(
-        5 * [133] + 7 * [174] + 9 * [138] + 11 * [95],
-        device=device,
-        dtype=dtype,
-    ),
+    "alpha_wodip": 5 * [1.765] + 7 * [1.011] + 9 * [0.455] + 11 * [0.177],
+    "tau_wodip": 5 * [133] + 7 * [174] + 9 * [138] + 11 * [95],
     "axial": True,
 }
 
 field_params = archkalmag_field_params_2p
 
-use_dip = False
-
 clip_nigp_D = 30  # declination clipping for nigp value in deg.
 clip_nigp_I = 15  # inclination clipping for nigp value in deg.
-clip_nigp_F = 3  # intensity clipping for nigp value in uT
+clip_nigp_F = 3   # intensity clipping for nigp value in uT
 
-trunc_dir = 3.4  # directional truncation error in deg.
-trunc_int = 2  # intensity truncation error in uT
-# due to the 1 / cos the declination contribution sometimes explodes:
-clip_trunc_D = 30  # clipping for declination contribution due to truncation
+# MCMC parameters
+# -----------------------------------------------------------------------------
+# Other parameters
+tDir = 3.4 * 57.3 / 140  # Directional truncation error in Deg.
+# tDir = 1.4                    # smaller value after investigation
+tInt = 2.0  # Intensity truncation error in uT
+alpha_nu = 2.0
+beta_nu = 0.1
+# -----------------------------------------------------------------------------
+# Age-depth model parameters
+acc_shape = 8
+mem_mean = 0.5
+mem_strength = 10
+default_acc_mean = 20
+mem_alpha = mem_strength * mem_mean
+mem_beta = mem_strength * (1 - mem_mean)
+
+# -----------------------------------------------------------------------------
+# MCMC parameters
+mcmc_params = {
+    "n_samps": 500,
+    "n_warmup": 1000,
+    "n_chains": 4,
+    "target_accept": 0.9,
+}

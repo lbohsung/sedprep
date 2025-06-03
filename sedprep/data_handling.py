@@ -19,22 +19,24 @@
 
 import pandas as pd
 import numpy as np
-import torch
+
 from scipy.interpolate import interp1d
 import hashlib
 from warnings import warn
 
 from pymagglobal.utils import lmax2N
 
-from sedprep.constants import (
-    field_params,
-    mad_to_alpha_factors,
-    REARTH,
-    device,
-    dtype,
+from hamstr_utils import (
+    get_acc_mean,
+    get_K_factor,
+    get_brks_half_offset,
+    get_levels_dict,
 )
-from sedprep.utils import dsh_basis, nez2dif
-from sedprep import deconvolve
+
+from constants import field_params as fp, mad_to_alpha_factors, REARTH
+from utils import dsh_basis
+
+# import deconvolve
 
 
 def adjust_declination(dec):
@@ -43,12 +45,12 @@ def adjust_declination(dec):
 
     Parameters
     ----------
-    dec : pandas.DataFrame.Series, list, numpy.array or torch.tensor
+    dec : pandas.DataFrame.Series, list or numpy.array
         Magnetic declination (D) values.
 
     Returns
     -------
-    pandas.DataFrame.Series, list, numpy.array or torch.tensor
+    pandas.DataFrame.Series, list or numpy.array
         Mapped declination values in the range (-180, 180].
     """
     if isinstance(dec, pd.Series):
@@ -61,18 +63,9 @@ def adjust_declination(dec):
             dec = [d if d <= 180 else d - 360 for d in dec]
         while np.min(dec) <= -180:
             dec = [d if d > -180 else d + 360 for d in dec]
-    elif torch.is_tensor(dec):
-        if dec.numel() > 0:
-            while torch.max(dec) > 180:
-                dec = torch.where(dec <= 180, dec, dec - 360)
-            while torch.min(dec) <= -180:
-                dec = torch.where(dec > -180, dec, dec + 360)
-        else:
-            return dec
     else:
         raise TypeError(
-            "Input must be a pandas DataFrame Series,"
-            " list, numpy array or torch tensor."
+            "Input must be a pandas DataFrame Series," " list or numpy array."
         )
     return dec
 
@@ -126,34 +119,6 @@ def alpha95_to_dD_dI(alpha95, inc, lat):
         dI / np.cos(np.arctan(2 * np.tan(np.deg2rad(lat)))),
     )
     return dD, dI
-
-
-def max_lit(acc_rates, max_lid, delta_t):
-    """
-    Calculate the maximal lock-in time corresponding to the passed maximal
-    lock-in depth, using the derivative of the age-depth model.
-
-    Parameters
-    ----------
-    t2d : scipy.interpolate.CubicHermiteSpline
-        The age-depth model represented as a piecewise linear interpolation.
-    max_lid : float
-        The maximal lock-in depth.
-    delta_t : float
-        The time step used in the Kalman filter.
-
-    Returns
-    -------
-    float
-        The maximal lock-in time, calculated based on the age-depth model,
-        the specified maximal lock-in depth, and the time step.
-    """
-    if torch.is_tensor(max_lid):
-        max_lid = max_lid.cpu().detach().numpy()
-    max_lit = max_lid / np.min(np.abs(acc_rates))
-    max_lit = np.round(max_lit / delta_t + 0.5)
-    max_lit *= delta_t * 1.0
-    return max_lit
 
 
 def offset_dec(data, offsets):
@@ -315,119 +280,100 @@ def add_identifier(fname):
     data.to_csv(fname, index=False)
 
 
-def clean_data(
-    data, bs_DI=None, bs_F=None, offsets=None, f_shallow=None, cal_fac=None
-):
-    """
-    Clean and preprocess the given data.
-    This function allows for optional preprocessing steps, including
-    unshallowing inclination, applying offsets to subsections in declination,
-    and deconvolving declination and inclination. It returns a cleaned and
-    processed data DataFrame.
+# def clean_data(
+#     data, bs_DI=None, bs_F=None, offsets=None, f_shallow=None, cal_fac=None
+# ):
+#     """
+#     Clean and preprocess the given data.
+#     This function allows for optional preprocessing steps, including
+#     unshallowing inclination, applying offsets to subsections in declination,
+#     and deconvolving declination and inclination. It returns a cleaned and
+#     processed data DataFrame.
 
-    Parameters
-    ----------
-    data : pandas.DataFrame
-        The input data containing declination (D), inclination (I),
-        and associated uncertainties (dD and dI).
+#     Parameters
+#     ----------
+#     data : pandas.DataFrame
+#         The input data containing declination (D), inclination (I),
+#         and associated uncertainties (dD and dI).
 
-    bs_DI : numpy.ndarray or list, optional
-        An array of shape (4,) or a list with 4 entries representing the
-        directional lock-in function parameters b_1 to b_4 used
-        for deconvolution.
-        If provided, deconvolution of declination and inclination is performed.
-        Default is None.
+#     bs_DI : numpy.ndarray or list, optional
+#         An array of shape (4,) or a list with 4 entries representing the
+#         directional lock-in function parameters b_1 to b_4 used
+#         for deconvolution.
+#         If provided, deconvolution of declination and inclination is performed.
+#         Default is None.
 
-    bs_F : numpy.ndarray or list, optional
-        An array of shape (4,) or a list with 4 entries representing the
-        intensity lock-in function parameters b_1 to b_4 used
-        for deconvolution.
-        If provided, deconvolution of declination and inclination is performed.
-        Default is None.
+#     offsets : float or dictionary
+#         If Float: Number representing the offset for the whole core
+#         If dictionary: Keys correspond to subsection names and values to the
+#         associated offsets applied to the subsections declinations.
+#         Default is None.
 
-    offsets : float or dictionary
-        If Float: Number representing the offset for the whole core
-        If dictionary: Keys correspond to subsection names and values to the
-        associated offsets applied to the subsections declinations.
-        Default is None.
+#     f_shallow : float, optional
+#         A scaling factor for unshallowing inclination data.
+#         If provided, unshallowing is performed.
+#         Default is None.
 
-    f_shallow : float, optional
-        A scaling factor for unshallowing inclination data.
-        If provided, unshallowing is performed.
-        Default is None.
+#     Returns
+#     -------
+#     pd.DataFrame
+#         A cleaned and processed data DataFrame with updated declination (D)
+#         and inclination (I) columns and associated updated uncertainties.
 
-    Returns
-    -------
-    pd.DataFrame
-        A cleaned and processed data DataFrame with updated declination (D)
-        and inclination (I) columns and associated updated uncertainties.
-
-    Example
-    -------
-    >>> data = pd.DataFrame({"depth": [34.0, 29.2, 25.0],
-    ...                      "t": [1628.901, 1679.669, 1724.09],
-    ...                      "dt": [300, 300, 300],
-    ...                      "lat": 60.151,
-    ...                      "lon": 13.055,
-    ...                      "D": [-10.067, -37.988, -33.412],
-    ...                      "I": [66.016, 66.090, 59.699],
-    ...                      "F": [58.55, 58.57, 58.66],
-    ...                      "dD": [1.791, 5.289, 2.161],
-    ...                      "dI": [0.478, 2.075, 0.478],
-    ...                      "dF": [13.13, 13.13, 12.1],
-    ...                      "type": "sediments",
-    ...                      "subs": ["A1", "A2", "A2"]})
-    >>> bs_DI = np.array([10, 10, 0, 10])
-    >>> offsets = -10
-    >>> clean_data(data, bs_DI=bs_DI, offsets=offsets, f_shallow=0.5)[
-    ...     ["D", "I", "F", "dD", "dI", "dF", "subs"]
-    ... ]
-              D          I      F         dD        dI     dF subs
-    0  2.483714  77.060772  58.55  20.709634  6.135548  13.13   A1
-    1  1.458709  77.317501  58.57  18.596219  5.678083  13.13   A2
-    2 -0.231032  77.449891  58.66  15.010178  4.430105  12.10   A2
-    >>> offsets = {"A1": 5, "A2": -10}
-    >>> clean_data(data, bs_DI=bs_DI, offsets=offsets, f_shallow=0.5)[
-    ...     ["D", "I", "F", "dD", "dI", "dF", "subs"]
-    ... ]
-               D          I      F         dD        dI     dF subs
-    0  -9.259935  77.060772  58.55  20.709634  6.135548  13.13   A1
-    1 -11.039868  77.317501  58.57  18.596219  5.678083  13.13   A2
-    2 -12.905582  77.449891  58.66  15.010178  4.430105  12.10   A2
-    """
-    data = data.copy()
-    if f_shallow is not None:
-        data["I"] = unshallow_inc(data.I, f_shallow)
-    if offsets is not None:
-        data = offset_dec(data, offsets)
-    if bs_DI is not None:
-        if sum(bs_DI) > 1:
-            data_sub = data.dropna(
-                subset=["D", "I"], how="all"
-            ).reset_index(drop=True)
-            mean_D, cov_D, mean_I, cov_I = deconvolve.deconvolve(
-                data_sub, bs_DI=bs_DI, quiet=False
-            )
-            data_sub["D"] = mean_D
-            data_sub["dD"] = np.sqrt(data_sub["dD"] ** 2 + np.diag(cov_D))
-            data_sub["I"] = mean_I
-            data_sub["dI"] = np.sqrt(data_sub["dI"] ** 2 + np.diag(cov_I))
-            data = data_sub[["t", "D", "I", "dD", "dI"]].merge(
-                data.drop(["D", "I", "dD", "dI"], axis=1), how="right", on="t"
-            )
-    if cal_fac is not None:
-        data["F"] *= cal_fac
-        data["dF"] *= cal_fac
-    if bs_F is not None:
-        if sum(bs_F) > 1:
-            data_sub = data.dropna(subset=["F"], how="all").reset_index(drop=True)
-            mean_F, cov_F = deconvolve.deconvolve(data_sub, bs_F=bs_F, quiet=False)
-            data_sub["F"] = mean_F
-            data_sub["dF"] = np.sqrt(data_sub["dF"] ** 2 + np.diag(cov_F))
-            data = data_sub[["t", "F", "dF"]].merge(
-                data.drop(["F", "dF"], axis=1), how="right", on="t"
-            )
-    return data
+#     Example
+#     -------
+#     >>> data = pd.DataFrame({"depth": [34.0, 29.2, 25.0],
+#     ...                      "t": [1628.901, 1679.669, 1724.09],
+#     ...                      "dt": [300, 300, 300],
+#     ...                      "lat": 60.151,
+#     ...                      "lon": 13.055,
+#     ...                      "D": [-10.067, -37.988, -33.412],
+#     ...                      "I": [66.016, 66.090, 59.699],
+#     ...                      "F": [58.55, 58.57, 58.66],
+#     ...                      "dD": [1.791, 5.289, 2.161],
+#     ...                      "dI": [0.478, 2.075, 0.478],
+#     ...                      "dF": [13.13, 13.13, 12.1],
+#     ...                      "type": "sediments",
+#     ...                      "subs": ["A1", "A2", "A2"]})
+#     >>> bs_DI = np.array([10, 10, 0, 10])
+#     >>> offsets = -10
+#     >>> clean_data(data, bs_DI=bs_DI, offsets=offsets, f_shallow=0.5)[
+#     ...     ["D", "I", "F", "dD", "dI", "dF", "subs"]
+#     ... ]
+#               D          I      F         dD        dI     dF subs
+#     0  2.483714  77.060772  58.55  20.709634  6.135548  13.13   A1
+#     1  1.458709  77.317501  58.57  18.596219  5.678083  13.13   A2
+#     2 -0.231032  77.449891  58.66  15.010178  4.430105  12.10   A2
+#     >>> offsets = {"A1": 5, "A2": -10}
+#     >>> clean_data(data, bs_DI=bs_DI, offsets=offsets, f_shallow=0.5)[
+#     ...     ["D", "I", "F", "dD", "dI", "dF", "subs"]
+#     ... ]
+#                D          I      F         dD        dI     dF subs
+#     0  -9.259935  77.060772  58.55  20.709634  6.135548  13.13   A1
+#     1 -11.039868  77.317501  58.57  18.596219  5.678083  13.13   A2
+#     2 -12.905582  77.449891  58.66  15.010178  4.430105  12.10   A2
+#     """
+#     data = data.copy()
+#     if f_shallow is not None:
+#         data["I"] = unshallow_inc(data.I, f_shallow)
+#     if offsets is not None:
+#         data = offset_dec(data, offsets)
+#     if bs_DI is not None:
+#         if sum(bs_DI) > 1:
+#             data_sub = data.dropna(
+#                 subset=["D", "I"], how="all"
+#             ).reset_index(drop=True)
+#             mean_D, cov_D, mean_I, cov_I = deconvolve.deconvolve(
+#                 data_sub, bs_DI=bs_DI, quiet=False
+#             )
+#             data_sub["D"] = mean_D
+#             data_sub["dD"] = np.sqrt(data_sub["dD"] ** 2 + np.diag(cov_D))
+#             data_sub["I"] = mean_I
+#             data_sub["dI"] = np.sqrt(data_sub["dI"] ** 2 + np.diag(cov_I))
+#             data = data_sub[["t", "D", "I", "dD", "dI"]].merge(
+#                 data.drop(["D", "I", "dD", "dI"], axis=1), how="right", on="t"
+#             )
+#     return data
 
 
 def read_arch_data(fname, rejection_lists=None, update_mex=True):
@@ -545,9 +491,7 @@ def read_arch_data(fname, rejection_lists=None, update_mex=True):
     # Standard deviation for inclination
     dat["dI"] = dat["Alpha95[deg.]"]  # Just a copy
     # Fill missing inclination errors with 4.5 degree
-    dat["dI"] = dat["dI"].where(
-        dat["I"].isna() | dat["dI"].notna(), other=4.5
-    )
+    dat["dI"] = dat["dI"].where(dat["I"].isna() | dat["dI"].notna(), other=4.5)
     dat["dI"] *= 57.3 / 140.0
 
     # Standard deviation for declination
@@ -571,9 +515,7 @@ def read_arch_data(fname, rejection_lists=None, update_mex=True):
     dat.drop(dat.where(cond).dropna(how="all").index, inplace=True)
 
     # Fill missing declination errors with 4.5 degree
-    dat["dD"] = dat["dD"].where(
-        dat["D"].isna() | dat["dD"].notna(), other=4.5
-    )
+    dat["dD"] = dat["dD"].where(dat["D"].isna() | dat["dD"].notna(), other=4.5)
     dat["dD"] *= 57.3 / 140.0 / np.cos(np.deg2rad(dat["I"]))
     # Add radius and colatitude (for convenience)
     dat["rad"] = REARTH
@@ -673,293 +615,82 @@ def read_arch_data(fname, rejection_lists=None, update_mex=True):
     ]
 
 
-class Chunk:
-    def __init__(self, chunk, arch):
-        self.chunk = chunk.copy()
-        self.lat = torch.tensor(chunk.lat.values, device=device, dtype=dtype)
-        self.n = len(chunk)
-        self.idx_D_abs = chunk[~np.isnan(chunk.D)].index
-        self.idx_I_abs = chunk[~np.isnan(chunk.I)].index
-        self.idx_F_abs = chunk[~np.isnan(chunk.F)].index
-        self.idx_D_rel = self.idx_D_abs - np.min(chunk.index)
-        self.idx_I_rel = self.idx_I_abs - np.min(chunk.index)
-        self.idx_F_rel = self.idx_F_abs - np.min(chunk.index)
-        self.n_D = self.idx_D_abs.size
-        self.n_DI = self.n_D + self.idx_I_abs.size
-        self.n_DIF = self.n_DI + self.idx_F_abs.size
-        std_T = np.concatenate(
-            (
-                chunk["dt"].loc[self.idx_D_abs],
-                chunk["dt"].loc[self.idx_I_abs],
-                chunk["dt"].loc[self.idx_F_abs],
-            )
-        )
-        std_err = np.concatenate(
-            (
-                chunk["dD"].loc[self.idx_D_abs],
-                chunk["dI"].loc[self.idx_I_abs],
-                chunk["dF"].loc[self.idx_F_abs],
-            )
-        )
-        outputs = np.concatenate(
-            (
-                chunk["D"].loc[self.idx_D_abs],
-                chunk["I"].loc[self.idx_I_abs],
-                chunk["F"].loc[self.idx_F_abs],
-            )
-        )
+class Data:
+    def __init__(self, data, adm_data=None):
+        arch = "depth" not in data.columns
+        df = data.copy()
+        df = df.dropna(subset=["D", "I", "F"], how="all")
+        if not arch:
+            df = df.sort_values(by="depth", ascending=True)
+            self.depth = df.depth.values
+            self.colat = 90 - df.lat.values[0]
+        df = df.reset_index(drop=True)
+        self.n = len(df)
+        self.idx_D = np.asarray(df[~np.isnan(df.D)].index)
+        self.idx_I = np.asarray(df[~np.isnan(df.I)].index)
+        self.idx_F = np.asarray(df[~np.isnan(df.F)].index)
         if arch:
-            self.index = chunk.index
+            inp = [90 - df.lat, df.lon, np.full(len(df), REARTH)]
         else:
-            self.subs = chunk.dropna(subset="D").subs
-        self.errs_T = torch.from_numpy(std_T**2).to(device=device, dtype=dtype)
-        self.errs = torch.from_numpy(std_err**2).to(device=device, dtype=dtype)
-        self.outputs = torch.from_numpy(outputs).to(device=device, dtype=dtype)
+            df["D"] = adjust_declination(df["D"])
+            subcores = {}
+            # print(df.groupby("subs").D.mean())
+            for name in np.unique(df.subs.astype(str)):
+                _df = df.iloc[self.idx_D].reset_index(drop=True)
+                _df = _df[_df.subs == name]
+                mu = _df["D"].mean()
+                vals = np.zeros(len(df["D"]), dtype=bool)
+                vals[_df.index] = True
+                subcores[name] = (vals.copy(), mu)
+            self.subcores = subcores
 
-
-class ChunkedData:
-    def __init__(self, fname, lmax, delta_t, start=2000, end=-6000, adm_d2t=None):
-        if isinstance(fname, pd.DataFrame):
-            data = fname.copy()
-        else:
-            raise ValueError("Need to pass a DataFrame!")
-        arch = data.type[0] == "arch_data"
-        data.sort_values("t", ascending=False, inplace=True)
-        data.dropna(subset=["D", "I", "F"], inplace=True, how="all")
-        data["D"] = adjust_declination(data["D"])
-        data.reset_index(drop=True, inplace=True)
+            adm_data = adm_data.sort_values(by="depth", ascending=True)
+            adm_data = adm_data.reset_index(drop=True)
+            self.adm_data = adm_data
+            # self.adm_depth = adm_data["depth"].values
+            # self.adm_t = 1950 - adm_data["t"].values
+            # self.adm_dt = adm_data["dt"].values
+            # top_depth = 0
+            # bottom_depth = max(max(self.adm_depth), max(self.depth))
+            # K_fine_1 = int(bottom_depth - top_depth)
+            # median_depth_diff = np.median(
+            #     np.diff(np.sort(np.unique(self.adm_depth)))
+            # )
+            # K_fine_2 = np.round(16 * K_fine_1 / median_depth_diff)
+            # K_fine = int(min(K_fine_1, K_fine_2, 900))
+            # K_factor = get_K_factor(K_fine)
+            # brks = get_brks_half_offset(K_fine, K_factor)
+            # self.levels_dict = get_levels_dict(brks)
+            # n_lvls = self.levels_dict["n_levels"]
+            # K_fine = self.levels_dict[f"{n_lvls}"]["nK"]
+            # self.delta_c = (bottom_depth - top_depth) / K_fine
+            # c_depth_bottom = [
+            #     self.delta_c * c + top_depth
+            #     for c in list(range(1, K_fine + 1))
+            # ]
+            # self.c_depth_top = np.concatenate(
+            #     [[top_depth], c_depth_bottom[: K_fine - 1]]
+            # )
+            # self.modelled_depths = np.concatenate(
+            #     [[self.c_depth_top[0]], c_depth_bottom]
+            # )
+            # self.which_c = [
+            #     np.argmax((c_depth_bottom < d) * (c_depth_bottom - d))
+            #     for d in self.adm_depth
+            # ]
+            # self.acc_mean = get_acc_mean(self.adm_t, self.adm_depth)
+            # self.age0_bound = -70
+            # self.age0 = 1950 - adm_data["t"][adm_data["depth"] == 0].item()
+            # self.dage0 = adm_data["dt"][adm_data["depth"] == 0].item()
+            inp = [90 - df.lat[0], df.lon[0], REARTH]
+        self.base = dsh_basis(fp["lmax"], np.array(inp))
         if arch:
-            inp = [90 - data.lat, data.lon, np.full(len(data), REARTH)]
-        else:
-            inp = [90 - data.lat[0], data.lon[0], REARTH]
-            if adm_d2t is not None:
-                # Check for monotonicity
-                if not (
-                    np.all(np.diff(adm_d2t.x) > 0)
-                    or np.all(np.diff(adm_d2t.x) < 0)
-                ):
-                    raise ValueError("Depths must be strictly monotone.")
-                if not (
-                    np.all(np.diff(adm_d2t.y) > 0)
-                    or np.all(np.diff(adm_d2t.y) < 0)
-                ):
-                    raise ValueError("Ages must be strictly monotone.")
-                idx = adm_d2t.x < max(data.depth)
-                self.t2d = interp1d(
-                    adm_d2t.y[idx], adm_d2t.x[idx], kind='linear', fill_value="extrapolate"
-                )
-            else:
-                self.t2d = t2d(data)
-            self.acc_rates = np.diff(self.t2d.y) / np.diff(self.t2d.x)
-            self.n_DI = max(data[["D", "I"]].count())
-            self.n_F = data["F"].count()
-        self.base = torch.from_numpy(dsh_basis(lmax, np.array(inp))).to(
-            device=device, dtype=dtype
-        )
-
-        self.delta_t = delta_t
-        self.start = start
-        if arch:
-            self.base = self.base.reshape(lmax2N(lmax), len(data), 3)
-        else:
-            # calibrate RPI with prior calibration factor
-            # derived from axial dipole assumption
-            # to bring them in the same range as archeo intensities
-            self.axial_cal_fac = (
-                1
-                if np.isnan(np.mean(data["F"]))
-                else float(
-                    nez2dif(*(field_params["gamma"] * self.base[0, :]))[2]
-                    / np.mean(data["F"])
-                )
-            )
-            data["F"] *= self.axial_cal_fac
-            data["dF"] *= self.axial_cal_fac
-        self.chunks = []
-        while start > end:
-            chunk = data[(data.t < start) & (data.t >= start - delta_t)]
-            self.chunks.append(Chunk(chunk, arch))
-            start -= delta_t
-
-
-def chunk_data(
-    sed_data, arch_data, lmax, delta_t, start=2000, end=-6000, adm_d2t=None
-):
-    cdat_sed = ChunkedData(sed_data, lmax, delta_t, start, end, adm_d2t=adm_d2t)
-    cdat_arch = ChunkedData(arch_data, lmax, delta_t, start, end)
-    return cdat_sed, cdat_arch
-
-
-# def t2d_old(data):
-#     """
-#     Compute an age-depth model for sediment data.
-
-#     Parameters
-#     ----------
-#     data : pandas.DataFrame
-#         A DataFrame containing sediment data with columns
-#         't' (ages) and 'depth' (depths).
-
-#     Returns
-#     -------
-#     scipy.interpolate.CubicHermiteSpline
-#         A CubicHermiteSpline object representing the age-depth model.
-#     """
-#     # Check if sediment data exists in the input DataFrame
-#     idx_sed = data.query('type!="arch_data"').index
-#     for i in range(1, 4):
-#         if len(idx_sed):
-#             # Extract ages and depths from the DataFrame and process them
-#             ads = np.copy(
-#                 data.iloc[idx_sed]
-#                 .sort_values("depth")[["t", "depth"]]
-#                 .to_numpy()
-#                 .T,
-#             )
-#             # therefore flip the unique (i.e. sorted) result
-#             ads = np.flip(np.unique(ads, axis=1), axis=1)
-#             ages = ads[0]
-#             depths = ads[1]
-#             # Perform linear regression to find a linear age-depth model
-#             ads = np.unique(ads, axis=1)
-#             X = np.vstack((np.ones_like(ads[1]), ads[1]))
-#             # a, m = ads[0] @ X.T @ np.linalg.inv(X @ X.T)
-#             idx_u = int((len(ads[0]) * (i-1)/i))
-#             X_u = X[:, idx_u:]
-#             a_u, m_u = ads[0][idx_u:] @ X_u.T @ np.linalg.inv(X_u @ X_u.T)
-#             idx_l = int((len(ads[0]) * 1/i))
-#             X_l = X[:, :idx_l]
-#             a_l, m_l = ads[0][:idx_l] @ X_l.T @ np.linalg.inv(X_l @ X_l.T)
-#             # Insert boundary points for extrapolation
-#             depths = np.insert(depths, 0, np.array(-1000))[::-1]
-#             ages = np.insert(ages, 0, np.array(a_u - m_u * 1000))[::-1]
-#             depths = np.insert(depths, 0, np.array(1e8))
-#             ages = np.insert(ages, 0, np.array(a_l + m_l * 1e8))
-#         else:
-#             # If no sediment data exists, create a simple linear adm
-#             def _t2d(t):
-#                 return -0.05 * (t - 1950)
-
-#             ages = np.flip(np.unique(data["t"].to_numpy()))
-#             depths = _t2d(ages)
-#             # Insert boundary points for extrapolation
-#             depths = np.insert(depths, 0, np.array(-1000))[::-1]
-#             ages = np.insert(ages, 0, np.array(21950.0))[::-1]
-#             depths = np.insert(depths, 0, np.array(1e8))
-#             ages = np.insert(ages, 0, np.array(-199998050.0))
-#         # Calculate the slope (m) at each depth segment
-#         deltas = [
-#             0
-#             if depths[k + 1] == depths[k]
-#             else (depths[k + 1] - depths[k]) / (ages[k + 1] - ages[k])
-#             for k in range(len(depths) - 1)
-#         ]
-#         ms = [
-#             deltas[0]
-#             if k == 0
-#             else (
-#                 (deltas[k - 1] + deltas[k]) / 2
-#                 if np.sign(deltas[k - 1]) == np.sign(deltas[k])
-#                 else 0
-#             )
-#             for k in range(len(depths) - 1)
-#         ]
-#         ms.append(deltas[-1])
-#         for k in range(len(depths) - 1):
-#             if deltas[k] == 0:
-#                 ms[k] = 0
-#                 ms[k + 1] = 0
-#         # To prevent overshoot and ensure monotonicity, at least one of the
-#         # following three conditions must be met:
-#         alphas = np.array([m / d for m, d in zip(ms[:-1], deltas)])
-#         betas = np.array([m / d for m, d in zip(ms[1:], deltas)])
-#         ps = 2 * alphas + betas - 3
-#         qs = alphas + 2 * betas - 3
-#         phis = alphas - ps**2 / (3 * (alphas + betas - 2))
-#         phis = phis[~np.isnan(phis)]
-#         phis = phis[~np.isinf(phis)]
-#         cond1 = np.all(phis > 0)
-#         cond2 = np.all(ps <= 0)
-#         cond3 = np.all(qs <= 0)
-#         if not np.any([cond1, cond2, cond3]):
-#             warn(
-#                 "Age-depth model is not monotone.\n"
-#                 "None of the conditions described in "
-#                 "https://en.wikipedia.org/wiki/Monotone_cubic_interpolation "
-#                 "are met.\n"
-#                 "A new age-depth model with an adjusted slope of the "
-#                 "extrapolation is calculated."
-#             )
-#         else:
-#             break
-#     # Return the age-depth model as a Cubic Hermite Spline
-#     return CubicHermiteSpline(ages, depths, ms)
-
-
-# def d2t_old(data):
-#     """Inverse function to `t2d`. See `t2d` for more information."""
-#     ads = np.copy(
-#         data.sort_values("depth")[["t", "depth"]].to_numpy().T,
-#     )
-#     for i in range(1, 4):
-#         ads = np.unique(ads, axis=1)
-#         ages = ads[0]
-#         depths = ads[1]
-#         X = np.vstack((np.ones_like(ads[1]), ads[1]))
-#         # a, m = ads[0] @ X.T @ np.linalg.inv(X @ X.T)
-#         idx_u = int((len(ads[0]) * (i-1)/i))
-#         X_u = X[:, idx_u:]
-#         a_u, m_u = ads[0][idx_u:] @ X_u.T @ np.linalg.inv(X_u @ X_u.T)
-#         idx_l = int((len(ads[0]) * 1/i))
-#         X_l = X[:, :idx_l]
-#         a_l, m_l = ads[0][:idx_l] @ X_l.T @ np.linalg.inv(X_l @ X_l.T)
-#         depths = np.append(depths, np.array(-1000))[::-1]
-#         ages = np.append(ages, np.array(a_u - m_u * 1000))[::-1]
-#         depths = np.append(depths, np.array(1e8))
-#         ages = np.append(ages, np.array(a_l + m_l * 1e8))
-
-#         deltas = [
-#             0
-#             if ages[k + 1] == ages[k]
-#             else (ages[k + 1] - ages[k]) / (depths[k + 1] - depths[k])
-#             for k in range(len(ages) - 1)
-#         ]
-#         ms = [
-#             deltas[0]
-#             if k == 0
-#             else (
-#                 (deltas[k - 1] + deltas[k]) / 2
-#                 if np.sign(deltas[k - 1]) == np.sign(deltas[k])
-#                 else 0
-#             )
-#             for k in range(len(depths) - 1)
-#         ]
-#         ms.append(deltas[-1])
-#         for k in range(len(ages) - 1):
-#             if deltas[k] == 0:
-#                 ms[k] = 0
-#                 ms[k + 1] = 0
-#         # To prevent overshoot and ensure monotonicity, at least one of the
-#         # following three conditions must be met:
-#         alphas = np.array([m / d for m, d in zip(ms[:-1], deltas)])
-#         betas = np.array([m / d for m, d in zip(ms[1:], deltas)])
-#         ps = 2 * alphas + betas - 3
-#         qs = alphas + 2 * betas - 3
-#         phis = alphas - ps**2 / (3 * (alphas + betas - 2))
-#         phis = phis[~np.isnan(phis)]
-#         phis = phis[~np.isinf(phis)]
-#         cond1 = np.all(phis > 0)
-#         cond2 = np.all(ps <= 0)
-#         cond3 = np.all(qs <= 0)
-#         if not np.any([cond1, cond2, cond3]):
-#             warn(
-#                 "Age-depth model is not monotone.\n"
-#                 "None of the conditions described in "
-#                 "https://en.wikipedia.org/wiki/Monotone_cubic_interpolation "
-#                 "are met.\n"
-#                 "A new age-depth model with an adjusted slope of the "
-#                 "extrapolation is calculated."
-#             )
-#         else:
-#             break
-#     return CubicHermiteSpline(depths, ages, ms)
+            self.base = self.base.reshape(lmax2N(fp["lmax"]), len(df), 3)
+            self.t = df.t.values
+            self.dt = df.dt.values**2
+        self.out_D = df.loc[self.idx_D, "D"].to_numpy()
+        self.out_I = df.loc[self.idx_I, "I"].to_numpy()
+        self.out_F = df.loc[self.idx_F, "F"].to_numpy()
+        self.errs_D = df.loc[self.idx_D, "dD"].to_numpy() ** 2
+        self.errs_I = df.loc[self.idx_I, "dI"].to_numpy() ** 2
+        self.errs_F = df.loc[self.idx_F, "dF"].to_numpy() ** 2

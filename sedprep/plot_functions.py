@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from cartopy import crs as ccrs, feature as cfeature
 
 # import pandas as pd
 # from matplotlib.ticker import FormatStrFormatter
@@ -7,9 +8,9 @@ import pathlib
 import pymagglobal
 from pymagglobal.utils import i2lm_l
 
-from sedprep.data_handling import t2d, d2t
-from sedprep.constants import REARTH
-from sedprep.utils import dsh_basis, nez2dif
+from data_handling import t2d, d2t
+from constants import REARTH
+from utils import dsh_basis, nez2dif
 
 path = pathlib.Path(__file__).parent.resolve()
 
@@ -48,7 +49,7 @@ def plot_DIF(
     err_alpha=0.4,
     distinguish_subs=True,
     legend=True,
-    subs_cmap="autumn",
+    subs_cmap="tab20",
     color="C0",
     pymagglobal_model_name=None,
     model_file=None,
@@ -138,10 +139,10 @@ def plot_DIF(
             1000,
         )
         loc = (core["lat"][0], core["lon"][0])
-        dec, inc, int = pymagglobal.local_curve(model_knots, loc, model)
+        d, i, f = pymagglobal.local_curve(model_knots, loc, model)
         if axF is not None:
             axF_twin = axF.twinx() if axF_twin is None else axF_twin
-            for comp, ax in zip([dec, inc, int/1000], [axD, axI, axF_twin]):
+            for comp, ax in zip([d, i, f/1000], [axD, axI, axF_twin]):
                 ax.plot(
                     model_knots if d_t == "t" else _t2d(model_knots),
                     comp,
@@ -151,7 +152,7 @@ def plot_DIF(
                 )
             axF_twin.set_ylabel("Intensity [uT]")
         else:
-            for comp, ax in zip([dec, inc], [axD, axI]):
+            for comp, ax in zip([d, i], [axD, axI]):
                 ax.plot(
                     model_knots if d_t == "t" else _t2d(model_knots),
                     comp,
@@ -173,25 +174,26 @@ def plot_DIF(
         loc = np.array((90 - core.lat[0], core.lon[0], REARTH))
         base = dsh_basis(i2lm_l(model_coeffs.shape[0] - 1), loc)
         nez = np.einsum("ij, ikl->jkl", base, model_coeffs)
-        dec, inc, int = nez2dif(*nez, be=np)
+        d, i, f = nez2dif(*nez, be=np)
         if axF is not None:
             axF_twin = axF.twinx() if axF_twin is None else axF_twin
-            for comp, ax in zip([dec, inc, int], [axD, axI, axF_twin]):
+            model_x = model_knots if d_t == "t" else _t2d(model_knots)
+            for comp, ax in zip([d, i, f], [axD, axI, axF_twin]):
                 ax.plot(
-                    model_knots if d_t == "t" else _t2d(model_knots),
+                    model_x,
                     np.mean(comp, axis=0),
                     c="gray",
                     label="ArchKalmag14k.r",
                 )
                 ax.plot(
-                    model_knots if d_t == "t" else _t2d(model_knots),
-                    comp[::10].T,
+                    model_x,
+                    comp.T,
                     c="gray",
                     alpha=0.05,
                 )
             axF_twin.set_ylabel("Intensity [uT]")
         else:
-            for comp, ax in zip([dec, inc], [axD, axI]):
+            for comp, ax in zip([d, i], [axD, axI]):
                 ax.plot(
                     model_knots if d_t == "t" else _t2d(model_knots),
                     np.mean(comp, axis=0),
@@ -200,7 +202,7 @@ def plot_DIF(
                 )
                 ax.plot(
                     model_knots if d_t == "t" else _t2d(model_knots),
-                    comp[::10].T,
+                    comp.T,
                     c="gray",
                     alpha=0.05,
                 )
@@ -224,6 +226,29 @@ def plot_DIF(
     if limit_y_to_data:
         axD.set_ylim((y_lim_D[0], y_lim_D[1]))
         axI.set_ylim(y_lim_I)
+
+
+def plot_map(lat, lon, fig=None, ax=None):
+    if ax is None:
+        fig, ax = plt.subplots(1, 1)
+    ax.axis("off")
+    left, bottom, width, height = ax.get_position().bounds
+    global_ax = fig.add_axes(
+        (left-0.03, bottom-0.08, width+0.03, height),
+        rasterized=True,
+        projection=ccrs.Mollweide()
+    )
+    global_ax.set_global()
+    global_ax.add_feature(cfeature.LAND, zorder=0, color="lightgray")
+    global_ax.scatter(
+        lon,
+        lat,
+        marker="*",
+        c="C3",
+        rasterized=True,
+        transform=ccrs.PlateCarree()
+    )
+
 
 
 # def _log_prob_t(t, dat, calibration_curve, a=3, b=4):

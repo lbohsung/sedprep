@@ -18,19 +18,21 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import numpy as np
-import torch
+# import torch
 import scipy
 import requests
 import io
 from warnings import warn
+from pytensor import tensor as pt, shared
 
 from pymagglobal.utils import lmax2N
+
 # from pymagglobal.utils import dsh_basis as _dsh_basis
 
-from sedprep.constants import rad2deg, field_params, dtype, REARTH
+from constants import rad2deg, field_params, REARTH
 
 
-def nez2dif(n, e, z, f_shallow=1, cal_fac=1, be=torch):
+def nez2dif(n, e, z, f_shallow=1, cal_fac=1, be=np):
     """
     Transform the magnetic field components north, east and vertically
     downward to declination, inclination and intensity. This is similar to a
@@ -72,101 +74,42 @@ def nez2dif(n, e, z, f_shallow=1, cal_fac=1, be=torch):
     )
 
 
-def grad_d(b):
-    """
-    Calculate the gradient of the declination.
-
-    Parameters
-    ----------
-    b : torch.Tensor
-        The input tensor with shape (N, 3) representing N geomagnetic field
-        components north, east and vertically.
-
-    Returns
-    -------
-    torch.Tensor
-        The gradient of the declination, with the same shape as the input 'b'.
-
-    Examples
-    --------
-    >>> b = torch.tensor([[1.0, 2.0, 3.0]])
-    >>> grad_d(b)
-    tensor([[-22.9183,  11.4592,   0.0000]])
-    >>> b = torch.tensor([[1.0, 2.0, 3.0], [5, 6, 7]])
-    >>> grad_d(b)
-    tensor([[-22.9183,  11.4592,   0.0000],
-            [ -5.6357,   4.6964,   0.0000]])
-    """
-    res = torch.zeros_like(b, device=b.device)
-    res[:, 0] = -b[:, 1]
-    res[:, 1] = b[:, 0]
-    res /= (b[:, 0] ** 2 + b[:, 1] ** 2)[:, None]
-    return res * rad2deg
-
-
-def grad_i(b, f_shallow=1):
-    """
-    Calculate the gradient of the inclination.
-
-    Parameters
-    ----------
-    b : torch.Tensor
-        The input tensor with shape (N, 3) representing N geomagnetic field
-        components north, east and vertically.
-    f_shallow : float, optional
-        A scaling factor for the inclination shallow effect.
-        It has to be a number between 0 (complete shallowing)
-        and 1 (no shallowing). Default is 1.0.
-
-    Returns
-    -------
-    torch.Tensor
-        The gradient of the inclination, with the same shape as the input 'b'.
-
-    Examples
-    --------
-    >>> b = torch.tensor([[1.0, 2.0, 3.0], [5, 6, 7]])
-    >>> grad_i(b)
-    tensor([[ -5.4907, -10.9815,   9.1512],
-            [ -2.3342,  -2.8010,   4.0681]])
-    >>> grad_i(b, f_shallow=0.5)
-    tensor([[ -5.3014, -10.6028,   8.8357],
-            [ -1.7526,  -2.1031,   3.0546]])
-    """
-    res = torch.zeros_like(b, device=b.device)
+def grad_dif(b):
     F_H_sq = b[:, 0] ** 2 + b[:, 1] ** 2
-    F_f = F_H_sq + f_shallow**2 * b[:, 2] ** 2
-    res[:, 0] = -b[:, 2] * b[:, 0]
-    res[:, 1] = -b[:, 2] * b[:, 1]
-    res[:, 2] = F_H_sq
-    res /= (torch.sqrt(F_H_sq) * F_f)[:, None]
-    return f_shallow * res * rad2deg
+    F_f = F_H_sq + b[:, 2] ** 2
+    grad_d = pt.stacklists(
+        [-b[:, 1], b[:, 0], pt.zeros_like(b[:, 0])] / F_H_sq
+    ).T
+    dn = -b[:, 2] * b[:, 0]
+    de = -b[:, 2] * b[:, 1]
+    dz = F_H_sq
+    grad_i = pt.stacklists([dn, de, dz] / (pt.sqrt(F_H_sq) * F_f)).T
+    grad_f = pt.stacklists([b[:, 0], b[:, 1], b[:, 2]] / pt.sqrt(F_f)).T
+    return pt.rad2deg(grad_d), pt.rad2deg(grad_i), grad_f
 
 
-def grad_f(b, cal_fac=1):
-    """
-    Calculate the gradient of the intensity.
+# def grad_d(b):
+#     F_H_sq = b[:, 0] ** 2 + b[:, 1] ** 2
+#     dn = -b[:, 1]
+#     de = b[:, 0]
+#     dz = 0 * de
+#     res = pt.stacklists([dn, de, dz] / F_H_sq).T
+#     return pt.rad2deg(res)
 
-    Parameters
-    ----------
-    b : torch.Tensor
-        The input tensor with shape (N, 3) representing N geomagnetic field
-        components north, east and vertically.
 
-    Returns
-    -------
-    torch.Tensor
-        The gradient of the intensity, with the same shape as the input 'b'.
+# def grad_i(b):
+#     F_H_sq = b[:, 0] ** 2 + b[:, 1] ** 2
+#     F_f = F_H_sq + b[:, 2] ** 2
+#     dn = -b[:, 2] * b[:, 0]
+#     de = -b[:, 2] * b[:, 1]
+#     dz = F_H_sq
+#     res = pt.stacklists([dn, de, dz] / (pt.sqrt(F_H_sq) * F_f)).T
+#     return pt.rad2deg(res)
 
-    Examples
-    --------
-    >>> b = torch.tensor([[1.0, 2.0, 3.0], [5, 6, 7]])
-    >>> grad_f(b)
-    tensor([[0.2673, 0.5345, 0.8018],
-            [0.4767, 0.5721, 0.6674]])
-    """
-    res = b / torch.sqrt(b[:, 0] ** 2 + b[:, 1] ** 2 + b[:, 2] ** 2)[:, None]
-    return res / cal_fac
+
+# def grad_f(b):
+#     res = b / pt.sqrt(b[:, 0] ** 2 + b[:, 1] ** 2 + b[:, 2] ** 2)[:, None]
+#     return pt.rad2deg(res)
 
 
 def lif(bs):
@@ -198,8 +141,6 @@ def lif(bs):
     """
     if len(bs) == 2:
         bs = [bs[0], bs[1] / 2, bs[1], bs[1] / 2]
-    if torch.is_tensor(bs):
-        bs = bs.cpu().detach().numpy()
     pars = np.cumsum(bs)
     knots = np.concatenate(([-2, -1, 0], pars, [pars[3] + 1], [pars[3] + 2]))
     vals = np.zeros(7)
@@ -211,82 +152,6 @@ def lif(bs):
     # linear interpolation of lock-in function
     lockin_function = scipy.interpolate.BSpline(knots, vals, 1)
     return lockin_function
-
-
-def lif_antid(bs, use_spline=False, be=torch):
-    """
-    Returns the antiderivative of the parameterized lock-in function
-    for given parameters b_1 to b_4.
-
-    Parameters
-    ----------
-    bs : numpy.ndarray, list or torch.tensor
-        The four or two parameters that characterize the lock-in function
-    use_spline : bool, optional
-        If True, returns a spline antiderivative. If False, returns a function.
-        Default is False.
-    be : torch or numpy, optional
-        The library used for calculations. Default is the torch module.
-
-    Returns
-    -------
-    function or scipy.interpolate.BSpline
-        If `use_spline` is False, it returns a Python function that computes
-        the antiderivative.
-        If `use_spline` is True, it returns a spline antiderivative object.
-
-    See Also
-    --------
-    lif : Lock-in function.
-
-    Example
-    -------
-    >>> lock_in_func_antid = lif_antid([10, 10, 0, 10])
-    >>> lock_in_func_antid(16)
-    tensor(0.1800)
-    >>> lock_in_func_antid = lif_antid([10, 10, 0, 10], use_spline=True)
-    >>> lock_in_func_antid(16)
-    array(0.18)
-    >>> lock_in_func_antid = lif_antid(torch.tensor([10, 10, 0, 10]))
-    >>> lock_in_func_antid(16)
-    tensor(0.1800)
-    >>> lock_in_func_antid = lif_antid(torch.tensor([10, 10, 0, 10]))
-    >>> lock_in_func_antid((torch.linspace(8, 30, 8)))
-    tensor([0.0000, 0.0065, 0.0918, 0.2759, 0.5555, 0.8024, 0.9506, 1.0000])
-
-    """
-    # if len(bs) == 2:
-    #     bs_tmp = bs.clone()
-    #     bs = [bs_tmp[0], bs_tmp[1]/2, bs_tmp[1], bs_tmp[1]/2]
-    if isinstance(bs, list):
-        bs = np.array(bs) if be == np else torch.tensor(bs)
-    if use_spline:
-        return lif(bs).antiderivative()
-    else:
-        bs = be.cumsum(bs, axis=0, dtype=dtype if be == torch else None)
-        b0 = bs[0]
-        b1 = bs[1] if len(bs) == 4 else (bs[0] + bs[1]) / 2
-        b2 = bs[2] if len(bs) == 4 else (3 * bs[1] - bs[0]) / 2
-        b3 = bs[3] if len(bs) == 4 else 2 * bs[1] - bs[0]
-        beta = 2 / (b3 + b2 - b1 - b0)
-
-        def f(x):
-            if isinstance(x, (int, float)):
-                x = np.array(x) if be == np else torch.tensor(x, dtype=dtype)
-            cond1 = (b0 < x) & (x <= b1)
-            cond2 = (b1 < x) & (x <= b2)
-            cond3 = (b2 < x) & (x <= b3)
-            result = be.zeros_like(x, dtype=dtype if be == torch else None)
-            result[cond1] = beta * (x[cond1] - b0) ** 2 / (2 * (b1 - b0))
-            result[cond2] = beta * (x[cond2] - (b1 + b0) / 2)
-            result[cond3] = beta * (
-                -(x[cond3] ** 2 / 2 - b3 * x[cond3] + b2**2 / 2) / (b3 - b2)
-                - (b1 + b0) / 2
-            )
-            result[x > b3] = 1
-            return result
-
-        return f
 
 
 def compute_hlid(bs):
@@ -461,6 +326,128 @@ def t2ocx(tf, ts, be=np):
     # o = np.sqrt(c**2 - x**2)
     o = 1 / be.sqrt(tf * ts)
     return o, c, x
+
+
+def ox2t(o, x):
+    c = np.sqrt(x**2 + o**2)
+    # t1 = 2 * np.pi * (c - x) / o**2
+    # t2 = 2 * np.pi * (c + x) / o**2
+    t1 = (c - x) / o**2
+    t2 = (c + x) / o**2
+    return t1, t2
+
+
+def interp(_x, _xp, _fp):
+    """
+    Simple equivalent of np.interp to compute a linear interpolation. This
+    function will not extrapolate, but use the edge values for points outside
+    of _xp.
+    """
+    xp = shared(_xp) if isinstance(_xp, (np.ndarray, list)) else _xp
+    fp = shared(_fp) if isinstance(_fp, (np.ndarray, list)) else _fp
+    # No extrapolation!
+    x = pt.clip(_x, xp[0], xp[-1])
+    # First we find the nearest neighbour
+    ind = pt.argmin((x[:, None] - xp[None, :]) ** 2, axis=1)
+    xi = xp[ind]
+    # Figure out if we are on the right or the left of nearest
+    s = pt.sign(x - xi).astype(int)
+    # Perform linear interpolation
+    # (1-pt.abs(s))*1e-10) to prevent divide by zero error if we are exactly
+    # at the knot points
+    a = (fp[ind + s] - fp[ind]) / (
+        xp[ind + s] - xp[ind] + (1 - pt.abs(s)) * 1e-10
+    )[:, None]
+    b = fp[ind] - a * xp[ind, None]
+    return a * x[:, None] + b
+
+
+def interp1d(_x, _xp, _fp):
+    """
+    Simple equivalent of np.interp to compute a linear interpolation. This
+    function will not extrapolate, but use the edge values for points outside
+    of _xp.
+    """
+    xp = shared(_xp) if isinstance(_xp, (np.ndarray, list)) else _xp
+    fp = shared(_fp) if isinstance(_fp, (np.ndarray, list)) else _fp
+    # No extrapolation!
+    x = pt.clip(_x, xp[0], xp[-1])
+    # First we find the nearest neighbour
+    ind = pt.argmin((x[:, None] - xp[None, :]) ** 2, axis=1)
+    xi = xp[ind]
+    # Figure out if we are on the right or the left of nearest
+    s = pt.sign(x - xi).astype(int)
+    # Perform linear interpolation
+    # (1-pt.abs(s))*1e-10) to prevent divide by zero error if we are exactly
+    # at the knot points
+    a = (fp[ind + s] - fp[ind]) / (
+        xp[ind + s] - xp[ind] + (1 - pt.abs(s)) * 1e-10
+    )
+    b = fp[ind] - a * xp[ind]
+    return a * x + b
+
+
+def interp_adm(_x, _xp, _fp, extrap):
+    """
+    Simple equivalent of np.interp to compute a linear interpolation with
+    extrapolation on the lower end. On the upper end the edge values will be
+    used for points outside of _xp.
+    """
+    xp = shared(_xp) if isinstance(_xp, (np.ndarray, list)) else _xp
+    fp = shared(_fp) if isinstance(_fp, (np.ndarray, list)) else _fp
+    # No extrapolation!
+    x = pt.clip(_x, xp[0], xp[-1])
+    # First we find the nearest neighbour
+    ind = pt.argmin((x[:, None] - xp[None, :]) ** 2, axis=1)
+    xi = xp[ind]
+    # Figure out if we are on the right or the left of nearest
+    s = pt.sign(x - xi).astype(int)
+    # Perform linear interpolation
+    # (1-pt.abs(s))*1e-10) to prevent divide by zero error if we are exactly
+    # at the knot points
+    a = (fp[ind + s] - fp[ind]) / (
+        xp[ind + s] - xp[ind] + (1 - pt.abs(s)) * 1e-10
+    )
+    b = fp[ind] - a * xp[ind]
+    return pt.switch(_x < xp[-1], a * x + b, (_x - xp[-1]) / extrap + fp[-1])
+
+
+def interp_adm_np(_x, xp, fp, extrap):
+    """
+    Simple equivalent of np.interp to compute a linear interpolation with
+    extrapolation outside of _xp range using extrap as the slope.
+    """
+    # No extrapolation!
+    x = np.clip(_x, xp[0], xp[-1])
+    # First we find the nearest neighbour
+    ind = np.argmin((x[:, None] - xp[None, :]) ** 2, axis=1)
+    xi = xp[ind]
+    # Figure out if we are on the right or the left of nearest
+    s = np.sign(x - xi).astype(int)
+    # Perform linear interpolation
+    # (1-pt.abs(s))*1e-10) to prevent divide by zero error if we are exactly
+    # at the knot points
+    a = (fp[ind + s] - fp[ind]) / (
+        xp[ind + s] - xp[ind] + (1 - np.abs(s)) * 1e-10
+    )
+    b = fp[ind] - a * xp[ind]
+    cond_high = _x < xp[-1]
+    cond_low = xp[0] < _x
+    return (
+        (a * x + b) * cond_high * cond_low
+        + (1 - cond_high) * ((_x - xp[-1]) / extrap + fp[-1])
+        + (1 - cond_low) * ((_x - xp[0]) / extrap + fp[0])
+    )
+
+
+def sqe_kernel(x, y=None, tau=2):
+    if y is None:
+        y = x
+    x = np.asarray(x)
+    y = np.asarray(y)
+    frac = ((x[:, None] - y[None, :]) / tau)**2
+    res = np.exp(-frac / 2.)
+    return res.reshape(x.shape[0], y.shape[0])
 
 
 def _fix_z(z):
